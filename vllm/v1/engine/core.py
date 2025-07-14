@@ -43,14 +43,44 @@ from vllm.v1.request import Request, RequestStatus
 from vllm.v1.serial_utils import MsgpackDecoder, MsgpackEncoder
 from vllm.v1.structured_output import StructuredOutputManager
 from vllm.version import __version__ as VLLM_VERSION
-
+import torch
+import functools
 logger = init_logger(__name__)
 
 POLLING_TIMEOUT_S = 2.5
 HANDSHAKE_TIMEOUT_MINS = 5
 
+
+# Environment variable to specify iteration ranges for profiling start/stop.
+# Format: "start1-stop1,start2-stop2,..." or single iterations "iter1,iter2,..."
+PROFILE_START_STOP_ENV_VAR_NAME = "VLLM_PROFILE_START_STOP"
+
 _R = TypeVar('_R')  # Return type for collective_rpc
 
+@functools.cache
+def _load_iteration_indexes(env_var: str):
+    spans = os.environ.get(env_var, None)
+    starts, stops = [], []
+
+    if spans:
+        spans = spans.split(',')
+
+        for span in spans:
+            try:
+                if '-' in span:
+                    start, stop = span.strip().split('-')
+                    starts.append(int(start))
+                    stops.append(int(stop))
+                else:
+                    it = int(span.strip())
+                    starts.append(it)
+                    stops.append(it)
+            except ValueError as e:
+                raise ValueError(
+                    f"Cannot parse span in environment variable `{env_var}`: {e}"
+                ) from None
+
+    return frozenset(starts), frozenset(stops)
 
 class EngineCore:
     """Inner loop of vLLM's Engine."""
@@ -60,7 +90,9 @@ class EngineCore:
                  executor_class: type[Executor],
                  log_stats: bool,
                  executor_fail_callback: Optional[Callable] = None):
-
+         # profile config
+        self.profile_start_iters, self.profile_stop_iters = _load_iteration_indexes(
+            PROFILE_START_STOP_ENV_VAR_NAME)
         # plugins need to be loaded at the engine/scheduler level too
         from vllm.plugins import load_general_plugins
         load_general_plugins()
@@ -296,6 +328,25 @@ class EngineCore:
 
     def profile(self, is_start: bool = True):
         self.model_executor.profile(is_start)
+    
+    @contextmanager
+    def cuda_profile_step(self):
+        it = -1
+        def profile_step():
+            nonlocal it
+            if it in self.profile_stop_iters:
+                torch.cuda.cudart().cudaProfilerStop()
+                logger.info(f"Profiling stopped at iteration {it}.")
+            it += 1
+
+            if it in self.profile_start_iters:
+                torch.cuda.cudart().cudaProfilerStart()
+                logger.info(f"Profiling started at iteration {it}.")
+                
+        try:
+            yield profile_step
+        finally:
+            torch.cuda.cudart().cudaProfilerStop()
 
     def reset_mm_cache(self):
         # NOTE: Since this is mainly for debugging, we don't attempt to
@@ -597,13 +648,14 @@ class EngineCoreProc(EngineCore):
 
     def run_busy_loop(self):
         """Core busy loop of the EngineCore."""
-
-        # Loop until process is sent a SIGINT or SIGTERM
-        while True:
-            # 1) Poll the input queue until there is work to do.
-            self._process_input_queue()
-            # 2) Step the engine core and return the outputs.
-            self._process_engine_step()
+        with self.cuda_profile_step() as profile_step:
+            # Loop until process is sent a SIGINT or SIGTERM
+            while True:
+                profile_step()
+                # 1) Poll the input queue until there is work to do.
+                self._process_input_queue()
+                # 2) Step the engine core and return the outputs.
+                self._process_engine_step()
 
     def _process_input_queue(self):
         """Exits when an engine step needs to be performed."""
