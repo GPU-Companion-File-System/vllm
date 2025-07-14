@@ -329,6 +329,7 @@ class EngineCore:
     def profile(self, is_start: bool = True):
         self.model_executor.profile(is_start)
     
+    @contextmanager
     def cuda_profile_step(self):
         it = -1
         def profile_step():
@@ -342,10 +343,10 @@ class EngineCore:
                 torch.cuda.cudart().cudaProfilerStart()
                 logger.info(f"Profiling started at iteration {it}.")
                 
-            try:
-                yield profile_step
-            finally:
-                torch.cuda.cudart().cudaProfilerStop()
+        try:
+            yield profile_step
+        finally:
+            torch.cuda.cudart().cudaProfilerStop()
 
     def reset_mm_cache(self):
         # NOTE: Since this is mainly for debugging, we don't attempt to
