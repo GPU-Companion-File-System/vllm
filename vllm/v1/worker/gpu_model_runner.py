@@ -1371,7 +1371,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         ):
             self.maybe_setup_kv_connector(scheduler_output)
 
-            with nvtx_range("[model_forward], num_input_tokens={len(input_ids)}, num_req={attn_metadata['model.layers.0.self_attn.attn'].seq_lens.numel()}"):
+            with nvtx_range(f"[model_forward], num_input_tokens={len(input_ids)}, num_req={attn_metadata['model.layers.0.self_attn.attn'].seq_lens.numel()}"):
                 model_output = self.model(
                     input_ids=input_ids,
                     positions=positions,
