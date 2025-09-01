@@ -316,6 +316,17 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # from the KV cache of `shared_kv_cache_layers[layer_name]`.
         self.shared_kv_cache_layers: dict[str, str] = {}
 
+        # 暂定最大 4096
+        max_save_tasks = 4096 
+        self.save_block_ids_buffer = torch.empty(
+            max_save_tasks, dtype=torch.int, device="cuda"
+        )
+        self.save_file_ids_buffer = torch.empty(
+            max_save_tasks, dtype=torch.int, device="cuda"
+        )
+        # 用于异步传输 ids 的 stream
+        self.transfer_stream = torch.cuda.Stream()
+
     def _may_reorder_batch(self, scheduler_output: "SchedulerOutput") -> None:
         """
         Update the order of requests in the batch based on the attention
@@ -591,6 +602,31 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         num_reqs = self.input_batch.num_reqs
         assert num_reqs > 0
 
+        block_ids = [spec.block_id for spec in scheduler_output.save_tasks_to_execute]
+        file_ids = [spec.file_id for spec in scheduler_output.save_tasks_to_execute]
+        num_save_tasks = len(block_ids)
+
+        # 检查是否超出预分配的缓冲区大小
+        if num_save_tasks > self.save_block_ids_buffer.shape[0]:
+            raise ValueError("Too many save tasks, exceed pre-allocated buffer.")
+        
+        # 准备异步传输 ids
+        block_ids_pinned = torch.tensor(
+            block_ids, dtype=torch.int, device="cpu"
+        ).pin_memory()
+
+        file_ids_pinned = torch.tensor(
+            file_ids, dtype=torch.int, device="cpu"
+        ).pin_memory()
+
+        # 3. 使用专用 stream，为两个 Tensor 并行发起非阻塞 H2D 传输
+        with torch.cuda.stream(self.transfer_stream):
+            self.save_block_ids_buffer[:num_save_tasks].copy_(block_ids_pinned, non_blocking=True)
+            self.save_file_ids_buffer[:num_save_tasks].copy_(file_ids_pinned, non_blocking=True)
+        
+        save_block_ids_gpu = self.save_block_ids_buffer[:num_save_tasks]
+        save_file_ids_gpu = self.save_file_ids_buffer[:num_save_tasks]
+        
         # OPTIMIZATION: Start copying the block table first.
         # This way, we can overlap the copy with the following CPU operations.
         self.input_batch.block_table.commit(num_reqs)
@@ -723,6 +759,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     kv_cache_group_spec.kv_cache_spec,
                     builder,
                 )
+
+            builder.set_save_tasks(save_block_ids_gpu, save_file_ids_gpu)
+            builder.set_save_stream(scheduler_output.save_stream)
 
             attn_metadata_i = (builder.build(
                 common_prefix_len=common_prefix_len,
@@ -1365,6 +1404,15 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 num_tokens_across_dp=num_tokens_across_dp,
                 skip_cuda_graphs=skip_cuda_graphs,
         ):
+            torch.cuda.current_stream().wait_stream(self.transfer_stream)
+
+            # [DEBUG] Log the save tasks after stream synchronization
+            if attn_metadata:
+                # All layers in a group share the same metadata, so we can
+                # just check the first one.
+                first_layer_name = next(iter(attn_metadata))
+                first_metadata = attn_metadata[first_layer_name]
+
             self.maybe_setup_kv_connector(scheduler_output)
             with nvtx_range(f"[model_forward], num_input_tokens={len(input_ids)}, num_req={attn_metadata['model.layers.0.self_attn.attn'].seq_lens.numel()}"):
                 model_output = self.model(

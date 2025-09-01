@@ -6,6 +6,10 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Optional
 
+from vllm.v1.core.sched.save_spec import SaveSpec
+from typing import List
+import torch
+
 if TYPE_CHECKING:
     import numpy as np
     import numpy.typing as npt
@@ -153,5 +157,9 @@ class SchedulerOutput:
     # the bitmask for the whole batch
     grammar_bitmask: Optional[npt.NDArray[np.int32]]
 
+    save_tasks_to_execute: List[SaveSpec]
+
+    save_stream: torch.cuda.Stream
+    
     # KV Cache Connector metadata.
     kv_connector_metadata: Optional[KVConnectorMetadata] = None

@@ -9,6 +9,11 @@ from collections import defaultdict
 from collections.abc import Iterable
 from typing import Any, Optional, Union
 
+import torch
+from typing import Dict, List, Set
+from dataclasses import dataclass
+from collections import deque
+
 from vllm.config import VllmConfig
 from vllm.distributed.kv_events import EventPublisherFactory, KVEventBatch
 from vllm.distributed.kv_transfer.kv_connector.factory import (
@@ -34,9 +39,54 @@ from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.request import Request, RequestStatus
 from vllm.v1.spec_decode.metrics import SpecDecodingStats
 from vllm.v1.structured_output import StructuredOutputManager
+from vllm.v1.core.sched.simulator import Simulator, StreamController
+from vllm.v1.core.sched.save_spec import SaveSpec
+
 
 logger = init_logger(__name__)
 
+
+# 任务队列
+class TaskQueueforSave():
+    def __init__(self):
+        self._tasks: deque[SaveSpec] = deque()
+        self._pending_block_ids: Set[int] = set()
+        
+    def submit_tasks(self, tasks: List[SaveSpec]):
+        success_submit = 0
+        for task in tasks:
+            # 判断是否存在历史block id
+            if task.block_id not in self._pending_block_ids:
+                self._pending_block_ids.add(task.block_id)
+                self._tasks.append(task)
+                success_submit += 1
+        logger.info(f"sucess submit {success_submit} tasks")
+    
+    # 这里的调用是为当前计算所需写盘的io准备的
+    def get_next_ntasks(self, n=1) -> List[SaveSpec]:
+        tasks_to_execute: List[SaveSpec] = []
+        num_to_pop = min(n, len(self._tasks))
+        if num_to_pop == 0:
+            return []
+        for i in range(num_to_pop):
+            tasks_to_execute.append(self._tasks.popleft())
+            self._pending_block_ids.remove(tasks_to_execute[-1].block_id)
+        return tasks_to_execute
+         
+    # 当请求内存被释放，对应的save task也应该一同回收
+    def withdraw_tasks(self, request_id: str) -> int:
+        tasks_to_keep = deque()
+        withdraw_block_ids = set()
+        for task in self._tasks:
+            if task.request_id == request_id:
+                withdraw_block_ids.add(task.block_id)
+            else:
+                tasks_to_keep.append(task)
+        withdraw_count = len(self._tasks) - len(tasks_to_keep)
+        if withdraw_count > 0:
+            self._tasks = tasks_to_keep
+            self._pending_block_ids.difference_update(withdraw_block_ids)
+        return withdraw_count
 
 class Scheduler(SchedulerInterface):
 
@@ -59,6 +109,39 @@ class Scheduler(SchedulerInterface):
         self.log_stats = log_stats
         self.structured_output_manager = structured_output_manager
 
+        self.io_task_queue = TaskQueueforSave()
+        gpu_tflops = 1000 #  TODO 随便取的数字，测试后填入具体数值
+        comm_io_bandwidth = 1000 
+        storage_io_bandwidth_Bps = 1000
+
+        chunk_layer_size = 1024
+        chunk_size_bytes = 1024 # TODO 需要从配置中获取, 还要再读读代码
+        
+        devices = [torch.device("cuda", i) for i in range(torch.cuda.device_count())]
+
+        stream_controller = StreamController(
+            devices=devices,
+            min_sm_partition=8,
+            sm_partition_step=8,
+            sms_per_io_task=1
+        )
+        # construct simulator
+        self.simulator = Simulator(
+            model=self.vllm_config.model_config,
+            comm_io_bandwidth=comm_io_bandwidth,
+            chunk_layer_size=chunk_layer_size,
+            streamController=stream_controller,
+            tp_size=self.vllm_config.parallel_config.tensor_parallel_size,
+            dp_size=self.vllm_config.parallel_config.data_parallel_size,
+            chunk_size_bytes=chunk_size_bytes,
+            storage_io_bandwidth_Bps=storage_io_bandwidth_Bps,
+            num_layers=self.vllm_config.model_config.get_num_layers(
+                self.vllm_config.parallel_config),
+            num_heads=self.vllm_config.model_config.get_num_attention_heads(
+                self.vllm_config.parallel_config),
+            hidden_size=self.vllm_config.model_config.get_hidden_size(),
+            gpu_tflops=gpu_tflops
+        )
         # include_finished_set controls whether a separate set of finished
         # request ids should be included in the EngineCoreOutputs returned
         # by update_from_outputs(). This is currently used in the multi-engine
@@ -162,6 +245,23 @@ class Scheduler(SchedulerInterface):
         )
         self.use_pp = self.parallel_config.pipeline_parallel_size > 1
 
+    def prepare_for_store(self, req_to_saved_block_ids: Dict[str, List[int]]) -> List[SaveSpec]:
+        unique_block_ids_in_batch: Set[int] = set()
+        tasks = []
+        for req_id, block_ids in req_to_saved_block_ids.items():
+            req_block_ids: List[int] = []
+            for block_id in block_ids:
+                if block_id not in unique_block_ids_in_batch:
+                    unique_block_ids_in_batch.add(block_id)
+                    req_block_ids.append(block_id)
+            # 为请求分配file ids
+            # TODO 接入 GeminiFS 之后再用这个写，先简单替代
+            # file_ids = self.connector.get_allocated_file_ids(req_block_ids.size())
+            file_ids = list(range(1, len(req_block_ids) + 1))
+            io_tasks = [SaveSpec(req_id, req_block_ids[i], file_ids[i]) for i in range(len(req_block_ids))]
+            tasks.extend(io_tasks)
+        return tasks
+
     def schedule(self) -> SchedulerOutput:
         # NOTE(woosuk) on the scheduling algorithm:
         # There's no "decoding phase" nor "prefill phase" in the scheduler.
@@ -188,6 +288,7 @@ class Scheduler(SchedulerInterface):
         structured_output_request_ids: dict[str, int] = {}
 
         req_to_new_block_ids: dict[str, tuple[list[int], ...]] = {}
+        req_to_saved_block_ids: dict[str, List[int]] = {} # TODO: 区分在显存的和在磁盘的，只落盘在显存的
         num_scheduled_tokens: dict[str, int] = {}
         token_budget = self.max_num_scheduled_tokens
         # Encoder-related.
@@ -259,6 +360,9 @@ class Scheduler(SchedulerInterface):
                         preempted_req = self.running.pop()
 
                     self.kv_cache_manager.free(preempted_req)
+                    #  io 队列出队
+                    self.io_task_queue.withdraw_tasks(preempted_req.request_id)
+
                     preempted_req.status = RequestStatus.PREEMPTED
                     preempted_req.num_computed_tokens = 0
                     if self.log_stats:
@@ -278,6 +382,14 @@ class Scheduler(SchedulerInterface):
             if not can_schedule:
                 break
             assert new_blocks is not None
+
+            all_groups = new_blocks.get_block_ids()
+            saved_block_ids = [
+                block_id for group in all_groups for block_id in group
+            ]
+            if request.request_id not in req_to_saved_block_ids:
+                req_to_saved_block_ids[request.request_id] = []
+            req_to_saved_block_ids[request.request_id].extend(saved_block_ids)
 
             # Schedule the request.
             scheduled_running_reqs.append(request)
@@ -445,6 +557,15 @@ class Scheduler(SchedulerInterface):
                 if new_blocks is None:
                     # The request cannot be scheduled.
                     break
+                
+                all_groups = new_blocks.get_block_ids()
+                saved_block_ids = [
+                    block_id for group in all_groups for block_id in group
+                ]
+                if request.request_id not in req_to_saved_block_ids:
+                    req_to_saved_block_ids[request.request_id] = []
+                req_to_saved_block_ids[request.request_id].extend(saved_block_ids)
+
 
                 # KVTransfer: the connector uses this info to determine
                 # if a load is needed. Note that
@@ -546,6 +667,24 @@ class Scheduler(SchedulerInterface):
             scheduled_spec_decode_tokens,
             req_to_new_block_ids,
         )
+        io_tasks = self.prepare_for_store(req_to_saved_block_ids)
+        self.io_task_queue.submit_tasks(io_tasks)
+        total_token_num = sum(num_scheduled_tokens.values())
+        max_token_num = max(num_scheduled_tokens.values(), default=0)
+        
+        if max_token_num > 1: #启发式判断stage
+            stage = "prefill"
+        else:
+            stage = "decode"
+        io_count, stream = self.simulator.execute(total_token_num, device=torch.device("cuda", 0), stage=stage)
+        # io_count 好像算的还不准，得改。
+        if stream is None:
+            logger.warning("No stream available for save tasks, using current stream")
+            stream = torch.cuda.current_stream()
+        
+        io_count = 100 # 只是测试，记得改回来。
+        save_tasks_to_execute = self.io_task_queue.get_next_ntasks(io_count)
+        
         scheduler_output = SchedulerOutput(
             scheduled_new_reqs=new_reqs_data,
             scheduled_cached_reqs=cached_reqs_data,
@@ -562,6 +701,8 @@ class Scheduler(SchedulerInterface):
             free_encoder_input_ids=self.encoder_cache_manager.get_freed_ids(),
             structured_output_request_ids=structured_output_request_ids,
             grammar_bitmask=grammar_bitmask,
+            save_tasks_to_execute=save_tasks_to_execute,
+            save_stream=stream,
         )
 
         # NOTE(Kuntai): this function is designed for multiple purposes:
@@ -576,6 +717,11 @@ class Scheduler(SchedulerInterface):
         if events:
             batch = KVEventBatch(ts=time.time(), events=events)
             self.kv_event_publisher.publish(batch)
+
+        # [DEBUG] Log the save tasks being sent to the worker
+        logger.info(f"[Scheduler] Save tasks to execute: "
+                    f"{scheduler_output.save_tasks_to_execute}")
+        logger.info(f"[Scheduler] Save stream: {scheduler_output.save_stream}")
 
         self._update_after_schedule(scheduler_output)
         return scheduler_output

@@ -130,6 +130,11 @@ class FlashAttentionMetadata:
     prefix_scheduler_metadata: Optional[torch.Tensor] = None
     max_num_splits: int = 0
 
+    # for save tasks
+    save_block_ids: Optional[torch.Tensor] = None
+    save_file_ids: Optional[torch.Tensor] = None
+    save_stream: Optional[torch.cuda.Stream] = None
+    
     # for local attention
     @dataclass
     class LocalAttentionMetadata:
@@ -206,6 +211,31 @@ class FlashAttentionMetadataBuilder(
         # Sliding window size to be used with the AOT scheduler will be
         # populated on first build() call.
         self.aot_sliding_window: Optional[tuple[int, int]] = None
+        
+        self.save_block_ids_gpu: Optional[torch.Tensor] = None
+        self.save_file_ids_gpu: Optional[torch.Tensor] = None
+        self.save_stream: Optional[torch.cuda.Stream] = None
+
+    
+    def set_save_tasks(
+        self,
+        block_ids: Optional[torch.Tensor],
+        file_ids: Optional[torch.Tensor],
+    ) -> None:
+        """
+        Sets the GPU tensors containing the block/file IDs for the save tasks.
+        """
+        self.save_block_ids_gpu = block_ids
+        self.save_file_ids_gpu = file_ids
+
+    def set_save_stream(
+        self,
+        stream: Optional[torch.cuda.Stream],
+    ) -> None:
+        """
+        Sets the stream for the save tasks.
+        """
+        self.save_stream = stream
 
     def build(
         self, common_prefix_len: int,
@@ -375,6 +405,9 @@ class FlashAttentionMetadataBuilder(
             local_attn_metadata=local_attn_metadata,
             prefix_scheduler_metadata=prefix_scheduler_metadata,
             max_num_splits=max_num_splits,
+            save_block_ids=self.save_block_ids_gpu,
+            save_file_ids=self.save_file_ids_gpu,
+            save_stream=self.save_stream,
         )
         return attn_metadata
 

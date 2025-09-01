@@ -56,6 +56,26 @@ class AttentionMetadataBuilder(abc.ABC, Generic[M]):
     full_cudagraph_supported: ClassVar[bool] = False
 
     @abstractmethod
+    def set_save_tasks(
+        self,
+        block_ids: Optional[torch.Tensor],
+        file_ids: Optional[torch.Tensor],
+    ) -> None:
+        """
+        Provides the builder with GPU tensors related to KV cache save tasks.
+        This must be called before build().
+        """
+        pass
+
+    @abstractmethod
+    def set_save_stream(self, stream: Optional[torch.cuda.Stream]) -> None:
+        """
+        Provides the builder with the CUDA stream used for save task I/O.
+        This must be called before build().
+        """
+        pass
+
+    @abstractmethod
     def build(self, common_prefix_len: int,
               common_attn_metadata: CommonAttentionMetadata) -> M:
         """
