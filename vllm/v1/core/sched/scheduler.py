@@ -24,7 +24,7 @@ from vllm.logger import init_logger
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
 from vllm.v1.core.encoder_cache_manager import (EncoderCacheManager,
                                                 compute_encoder_budget)
-from vllm.v1.core.kv_cache_manager import KVCacheManager
+from vllm.v1.core.kv_cache_manager import KVCacheBlocks, KVCacheManager
 from vllm.v1.core.sched.interface import SchedulerInterface
 from vllm.v1.core.sched.output import (CachedRequestData, NewRequestData,
                                        SchedulerOutput)
@@ -39,7 +39,7 @@ from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.request import Request, RequestStatus
 from vllm.v1.spec_decode.metrics import SpecDecodingStats
 from vllm.v1.structured_output import StructuredOutputManager
-from vllm.v1.core.sched.simulator import Simulator, StreamController
+from vllm.v1.core.sched.simulator import Simulator, StreamController, model_info, model_system_info, system_info
 from vllm.v1.core.sched.save_spec import SaveSpec
 
 
@@ -51,7 +51,10 @@ class TaskQueueforSave():
     def __init__(self):
         self._tasks: deque[SaveSpec] = deque()
         self._pending_block_ids: Set[int] = set()
-        
+    
+    def get_exist_io_num(self):
+        return len(self._tasks)
+
     def submit_tasks(self, tasks: List[SaveSpec]):
         success_submit = 0
         for task in tasks:
@@ -110,37 +113,91 @@ class Scheduler(SchedulerInterface):
         self.structured_output_manager = structured_output_manager
 
         self.io_task_queue = TaskQueueforSave()
-        gpu_tflops = 1000 #  TODO 随便取的数字，测试后填入具体数值
-        comm_io_bandwidth = 1000 
-        storage_io_bandwidth_Bps = 1000
 
-        chunk_layer_size = 1024
-        chunk_size_bytes = 1024 # TODO 需要从配置中获取, 还要再读读代码
-        
+        gpu_tflops = 30 
+        comm_io_bandwidth = 520 * 1024 * 1024 * 1024 # 520GB/s  
+        # 如果是多卡，nvlink 带宽为 600GB/s
+
+        storage_io_bandwidth_Bps = 10 * 1024 * 1024 * 1024 # 10GB/s
+        # 等待具体数值
+
         devices = [torch.device("cuda", i) for i in range(torch.cuda.device_count())]
 
-        stream_controller = StreamController(
-            devices=devices,
-            min_sm_partition=8,
-            sm_partition_step=8,
-            sms_per_io_task=1
-        )
+        if vllm_config.quant_config is None:
+            w_bit = 16
+        elif vllm_config.quant_config.get_name() == "awq":
+            w_bit = 4
+        elif vllm_config.quant_config.get_name() == "bitsandbytes":
+            w_bit = 4 if vllm_config.quant_config.load_in_4bit else 8
+        elif vllm_config.quant_config.get_name() == "gguf":
+            #TODO: GGUF 需要判断文件, 可能是 8
+            w_bit = 4
+        elif vllm_config.quant_config.get_name() == "torchao":
+            w_bit = 8
+        elif vllm_config.quant_config.get_name() == "tpu_int8":
+            w_bit = 8
+        elif vllm_config.quant_config.get_name() == "compressed-tensors":
+            w_bit = 4
+        elif vllm_config.quant_config.get_name() == "quark":
+            w_bit = 4 
+        else:
+            raise ValueError(f"Unsupported quantization method: {vllm_config.quant_config.get_name()}")
+        
+        model_dtype = self.vllm_config.model_config.dtype
+        if model_dtype == torch.float16 or model_dtype == torch.bfloat16:
+            a_bit = 16
+        elif model_dtype == torch.float32:
+            a_bit = 32
+        else:
+            # 默认情况
+            a_bit = 16
+        
+        # 如果是FP8，激活值也是8位
+        if self.vllm_config.quant_config is not None and self.vllm_config.quant_config.get_name() == "fp8":
+            a_bit = 8
+        if self.vllm_config.cache_config is not None:
+            kv_cache_dtype_str = self.vllm_config.cache_config.cache_dtype
+        else:
+            kv_cache_dtype_str = "float16"
+        kv_cache_dtype_str = self.vllm_config.cache_config.cache_dtype
+        if "int8" in kv_cache_dtype_str or "fp8" in kv_cache_dtype_str:
+            kv_bit = 8
+        elif "auto" in kv_cache_dtype_str:
+            # For "auto", the KV cache bit width matches the model's data type.
+            # We get the size in bytes from the torch dtype and convert to bits.
+            model_dtype = self.vllm_config.model_config.dtype
+            kv_bit = model_dtype.itemsize * 8
+        else:
+            # All other supported types like 'half', 'bfloat16' are 16-bit.
+            kv_bit = 16
+ 
         # construct simulator
         self.simulator = Simulator(
-            model=self.vllm_config.model_config,
-            comm_io_bandwidth=comm_io_bandwidth,
-            chunk_layer_size=chunk_layer_size,
-            streamController=stream_controller,
-            tp_size=self.vllm_config.parallel_config.tensor_parallel_size,
-            dp_size=self.vllm_config.parallel_config.data_parallel_size,
-            chunk_size_bytes=chunk_size_bytes,
-            storage_io_bandwidth_Bps=storage_io_bandwidth_Bps,
-            num_layers=self.vllm_config.model_config.get_num_layers(
-                self.vllm_config.parallel_config),
-            num_heads=self.vllm_config.model_config.get_num_attention_heads(
-                self.vllm_config.parallel_config),
-            hidden_size=self.vllm_config.model_config.get_hidden_size(),
-            gpu_tflops=gpu_tflops
+            model_system_info=model_system_info(
+                comm_io_bandwidth=comm_io_bandwidth,
+                storage_io_bandwidth_Bps=storage_io_bandwidth_Bps,
+                chunk_size_bytes=self.vllm_config.cache_config.block_size * 8, # 一个 token 预期占用多少 byte
+                tp_size=self.vllm_config.parallel_config.tensor_parallel_size,
+                dp_size=self.vllm_config.parallel_config.data_parallel_size,
+                w_bit=w_bit,
+                a_bit=a_bit,
+                kv_bit=kv_bit,
+            ),
+            model_info=model_info(
+                num_layers=self.vllm_config.model_config.get_num_layers(
+                    self.vllm_config.parallel_config),
+                num_heads=self.vllm_config.model_config.get_num_attention_heads(
+                    self.vllm_config.parallel_config),
+                hidden_size=self.vllm_config.model_config.get_hidden_size(),
+                gpu_tflops=gpu_tflops,
+                model=self.vllm_config.model_config,
+            ),
+            streamController=StreamController(
+                devices=devices,
+                min_sm_partition=8,
+                sm_partition_step=8,
+                sms_per_io_task=1
+            ),
         )
         # include_finished_set controls whether a separate set of finished
         # request ids should be included in the EngineCoreOutputs returned
@@ -262,6 +319,22 @@ class Scheduler(SchedulerInterface):
             tasks.extend(io_tasks)
         return tasks
 
+    def prepare_for_save_block(self, req_to_saved_block_ids: Dict[str, List[int]], 
+                               new_blocks: KVCacheBlocks, request: Request,
+                               num_external_computed_tokens : int, block_size: int):
+        all_groups = new_blocks.get_block_ids()
+        saved_block_ids = [
+            block_id for group in all_groups for block_id in group
+        ]
+        print("DEBUG: prepare_for_save_block", saved_block_ids, "num_external_computed_tokens:", num_external_computed_tokens, "block_size:", block_size)
+        if request.request_id not in req_to_saved_block_ids:
+            req_to_saved_block_ids[request.request_id] = []
+        start_save_index = (num_external_computed_tokens + block_size - 1) // block_size
+        req_to_saved_block_ids[request.request_id].extend(
+            saved_block_ids[start_save_index :]) 
+        # 命中的block 在前 num_external_computed_tokens / block_size 上取整中，所以取后面的是需要落盘的。
+        return 
+
     def schedule(self) -> SchedulerOutput:
         # NOTE(woosuk) on the scheduling algorithm:
         # There's no "decoding phase" nor "prefill phase" in the scheduler.
@@ -288,7 +361,7 @@ class Scheduler(SchedulerInterface):
         structured_output_request_ids: dict[str, int] = {}
 
         req_to_new_block_ids: dict[str, tuple[list[int], ...]] = {}
-        req_to_saved_block_ids: dict[str, List[int]] = {} # TODO: 区分在显存的和在磁盘的，只落盘在显存的
+        req_to_saved_block_ids: dict[str, List[int]] = {} 
         num_scheduled_tokens: dict[str, int] = {}
         token_budget = self.max_num_scheduled_tokens
         # Encoder-related.
@@ -382,14 +455,13 @@ class Scheduler(SchedulerInterface):
             if not can_schedule:
                 break
             assert new_blocks is not None
-
-            all_groups = new_blocks.get_block_ids()
-            saved_block_ids = [
-                block_id for group in all_groups for block_id in group
-            ]
-            if request.request_id not in req_to_saved_block_ids:
-                req_to_saved_block_ids[request.request_id] = []
-            req_to_saved_block_ids[request.request_id].extend(saved_block_ids)
+            print("DEBUG: new_blocks", new_blocks)
+            self.prepare_for_save_block(
+                req_to_saved_block_ids=req_to_saved_block_ids,
+                new_blocks=new_blocks,
+                request=request,
+                num_external_computed_tokens=0,
+                block_size=self.block_size)
 
             # Schedule the request.
             scheduled_running_reqs.append(request)
@@ -557,14 +629,13 @@ class Scheduler(SchedulerInterface):
                 if new_blocks is None:
                     # The request cannot be scheduled.
                     break
-                
-                all_groups = new_blocks.get_block_ids()
-                saved_block_ids = [
-                    block_id for group in all_groups for block_id in group
-                ]
-                if request.request_id not in req_to_saved_block_ids:
-                    req_to_saved_block_ids[request.request_id] = []
-                req_to_saved_block_ids[request.request_id].extend(saved_block_ids)
+                print("DEBUG: new_blocks", new_blocks)
+                self.prepare_for_save_block(
+                    req_to_saved_block_ids=req_to_saved_block_ids,
+                    new_blocks=new_blocks,
+                    request=request,
+                    num_external_computed_tokens=num_external_computed_tokens,
+                    block_size=self.block_size)
 
 
                 # KVTransfer: the connector uses this info to determine
@@ -667,6 +738,7 @@ class Scheduler(SchedulerInterface):
             scheduled_spec_decode_tokens,
             req_to_new_block_ids,
         )
+        print("DEBUG:", req_to_saved_block_ids)
         io_tasks = self.prepare_for_store(req_to_saved_block_ids)
         self.io_task_queue.submit_tasks(io_tasks)
         total_token_num = sum(num_scheduled_tokens.values())
@@ -676,13 +748,12 @@ class Scheduler(SchedulerInterface):
             stage = "prefill"
         else:
             stage = "decode"
-        io_count, stream = self.simulator.execute(total_token_num, device=torch.device("cuda", 0), stage=stage)
-        # io_count 好像算的还不准，得改。
+        io_count, stream = self.simulator.execute(total_token_num, device=torch.device("cuda", 0),
+                                                  exist_io_num=self.io_task_queue.get_exist_io_num(), stage=stage)
         if stream is None:
             logger.warning("No stream available for save tasks, using current stream")
             stream = torch.cuda.current_stream()
         
-        io_count = 100 # 只是测试，记得改回来。
         save_tasks_to_execute = self.io_task_queue.get_next_ntasks(io_count)
         
         scheduler_output = SchedulerOutput(

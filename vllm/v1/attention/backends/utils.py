@@ -4,7 +4,7 @@ import abc
 import functools
 from abc import abstractmethod
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, ClassVar, Generic, Optional, TypeVar
+from typing import TYPE_CHECKING, ClassVar, Generic, List, Optional, TypeVar
 
 import numpy as np
 import torch
@@ -58,8 +58,8 @@ class AttentionMetadataBuilder(abc.ABC, Generic[M]):
     @abstractmethod
     def set_save_tasks(
         self,
-        block_ids: Optional[torch.Tensor],
-        file_ids: Optional[torch.Tensor],
+        block_ids: List[int],
+        file_ids: List[int],
     ) -> None:
         """
         Provides the builder with GPU tensors related to KV cache save tasks.

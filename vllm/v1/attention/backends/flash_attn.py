@@ -1,8 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Attention layer with FlashAttention."""
-from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, ClassVar, Optional
+from dataclasses import dataclass, field
+from typing import TYPE_CHECKING, Any, ClassVar, List, Optional
 
 import numpy as np
 import torch
@@ -16,6 +16,7 @@ from vllm.attention.ops.merge_attn_states import merge_attn_states
 from vllm.attention.utils.fa_utils import (flash_attn_supports_fp8,
                                            get_flash_attn_version,
                                            is_flash_attn_varlen_func_available)
+from vllm.spec_decode.util import nvtx_range
 
 if is_flash_attn_varlen_func_available():
     from vllm.attention.utils.fa_utils import (flash_attn_varlen_func,
@@ -25,20 +26,50 @@ if is_flash_attn_varlen_func_available():
 from vllm.config import VllmConfig, get_layers_from_vllm_config
 from vllm.logger import init_logger
 from vllm.utils import cdiv
+from vllm.triton_utils import HAS_TRITON
 from vllm.v1.attention.backends.utils import (
     AttentionMetadataBuilder, CommonAttentionMetadata, get_kv_cache_layout,
     make_local_attention_virtual_batches)
 from vllm.v1.kv_cache_interface import AttentionSpec
 from vllm.v1.worker.block_table import BlockTable
 
-if TYPE_CHECKING:
-    from vllm.v1.worker.gpu_model_runner import GPUModelRunner
 
 logger = init_logger(__name__)
 
+if HAS_TRITON:
+    import triton
+    import triton.language as tl
+
+    @triton.jit
+    def io_kernel(io_buffer, block_size: tl.constexpr):
+        pid = tl.program_id(0)
+        offsets = pid * block_size + tl.arange(0, block_size)
+        # Simulate a load+store operation
+        REPEAT = 300 # 多次访问 memory 来模拟延迟
+        for i in range(REPEAT):
+            data = tl.load(io_buffer + offsets)
+            tl.store(io_buffer + offsets, data)
+
+    def _launch_io_kernel(num_blocks: int, block_size: int,
+                          device: torch.device, stream: torch.cuda.Stream):
+        """Launches the IO kernel to simulate memory operations."""
+        with nvtx_range("launch io_kernel"):
+            if num_blocks <= 0:
+                return
+
+            # Create a dummy buffer for the kernel to read from and write to.
+            total_elements = num_blocks * block_size
+            io_buffer = torch.randn(total_elements,
+                                    dtype=torch.float32,
+                                    device=device)
+
+            grid = (num_blocks, )
+            with torch.cuda.stream(stream):
+                io_kernel[grid](io_buffer, block_size=block_size)
+
+
 # NOTE(woosuk): This is an arbitrary number. Tune it if needed.
 _DEFAULT_MAX_NUM_SPLITS_FOR_CUDA_GRAPH = 16
-
 
 class FlashAttentionBackend(AttentionBackend):
 
@@ -131,8 +162,8 @@ class FlashAttentionMetadata:
     max_num_splits: int = 0
 
     # for save tasks
-    save_block_ids: Optional[torch.Tensor] = None
-    save_file_ids: Optional[torch.Tensor] = None
+    save_block_ids: List[int] = field(default_factory=list)
+    save_file_ids: List[int] = field(default_factory=list)
     save_stream: Optional[torch.cuda.Stream] = None
     
     # for local attention
@@ -500,103 +531,114 @@ class FlashAttentionImpl(AttentionImpl):
               We use torch's .expand() to avoid duplicating values
         """
         assert output is not None, "Output tensor must be provided."
+        with nvtx_range("FlashAttentionImpl forward"):
+            if output_scale is not None:
+                raise NotImplementedError(
+                    "fused output quantization is not yet supported"
+                    " for FlashAttentionImpl")
 
-        if output_scale is not None:
-            raise NotImplementedError(
-                "fused output quantization is not yet supported"
-                " for FlashAttentionImpl")
+            if attn_metadata is None:
+                # Profiling run.
+                return output
 
-        if attn_metadata is None:
-            # Profiling run.
-            return output
+            # IMPORTANT!
+            # NOTE(woosuk): With piece-wise CUDA graphs, this method is executed in
+            # eager-mode PyTorch. Thus, we need to be careful about any CPU overhead
+            # in this method. For example, `view` and `slice` (or `[:n]`) operations
+            # are surprisingly slow even in the case they do not invoke any GPU ops.
+            # Minimize the PyTorch ops in this method as much as possible.
+            # Whenever making a change in this method, please benchmark the
+            # performance to make sure it does not introduce any overhead.
 
-        # IMPORTANT!
-        # NOTE(woosuk): With piece-wise CUDA graphs, this method is executed in
-        # eager-mode PyTorch. Thus, we need to be careful about any CPU overhead
-        # in this method. For example, `view` and `slice` (or `[:n]`) operations
-        # are surprisingly slow even in the case they do not invoke any GPU ops.
-        # Minimize the PyTorch ops in this method as much as possible.
-        # Whenever making a change in this method, please benchmark the
-        # performance to make sure it does not introduce any overhead.
+            num_actual_tokens = attn_metadata.num_actual_tokens
+            key_cache, value_cache = kv_cache.unbind(0)
 
-        num_actual_tokens = attn_metadata.num_actual_tokens
-        key_cache, value_cache = kv_cache.unbind(0)
+            if self.kv_sharing_target_layer_name is None:
+                # Reshape the input keys and values and store them in the cache.
+                # Skip this if sharing KV cache with an earlier attention layer.
+                # NOTE(woosuk): Here, key and value are padded while slot_mapping is
+                # not padded. However, we don't need to do key[:num_actual_tokens]
+                # and value[:num_actual_tokens] because the reshape_and_cache_flash
+                # op uses the slot_mapping's shape to determine the number of
+                # actual tokens.
+                reshape_and_cache_flash(
+                    key,
+                    value,
+                    key_cache,
+                    value_cache,
+                    attn_metadata.slot_mapping,
+                    self.kv_cache_dtype,
+                    layer._k_scale,
+                    layer._v_scale,
+                )
 
-        if self.kv_sharing_target_layer_name is None:
-            # Reshape the input keys and values and store them in the cache.
-            # Skip this if sharing KV cache with an earlier attention layer.
-            # NOTE(woosuk): Here, key and value are padded while slot_mapping is
-            # not padded. However, we don't need to do key[:num_actual_tokens]
-            # and value[:num_actual_tokens] because the reshape_and_cache_flash
-            # op uses the slot_mapping's shape to determine the number of
-            # actual tokens.
-            reshape_and_cache_flash(
-                key,
-                value,
-                key_cache,
-                value_cache,
-                attn_metadata.slot_mapping,
-                self.kv_cache_dtype,
-                layer._k_scale,
-                layer._v_scale,
-            )
+            if self.kv_cache_dtype.startswith("fp8"):
+                key_cache = key_cache.view(torch.float8_e4m3fn)
+                value_cache = value_cache.view(torch.float8_e4m3fn)
+                num_tokens, num_heads, head_size = query.shape
+                query, _ = ops.scaled_fp8_quant(
+                    query.reshape(
+                        (num_tokens, num_heads * head_size)).contiguous(),
+                    layer._q_scale)
+                query = query.reshape((num_tokens, num_heads, head_size))
 
-        if self.kv_cache_dtype.startswith("fp8"):
-            key_cache = key_cache.view(torch.float8_e4m3fn)
-            value_cache = value_cache.view(torch.float8_e4m3fn)
-            num_tokens, num_heads, head_size = query.shape
-            query, _ = ops.scaled_fp8_quant(
-                query.reshape(
-                    (num_tokens, num_heads * head_size)).contiguous(),
-                layer._q_scale)
-            query = query.reshape((num_tokens, num_heads, head_size))
+            # Simulate IO based on the number of save tasks.
+            if HAS_TRITON:
+                # Each task simulates operating on one block of data.
+                # We can tune the block_size for simulation purposes.
+                SIMULATED_BLOCK_SIZE = 128
+                num_save_tasks = len(attn_metadata.save_block_ids)
+                _launch_io_kernel(num_blocks=num_save_tasks,
+                                block_size=SIMULATED_BLOCK_SIZE,
+                                device=query.device,
+                                stream=attn_metadata.save_stream)
 
-        # Compute attention and update output up to `num_actual_tokens`.
-        use_local_attn = \
-            (self.use_irope and attn_metadata.local_attn_metadata is not None)
+            # Compute attention and update output up to `num_actual_tokens`.
+            use_local_attn = \
+                (self.use_irope and attn_metadata.local_attn_metadata is not None)
 
-        if not attn_metadata.use_cascade or use_local_attn:
-            if use_local_attn:
-                assert attn_metadata.local_attn_metadata is not None
-                local_metadata = attn_metadata.local_attn_metadata
-                cu_seqlens_q = local_metadata.local_query_start_loc
-                seqused_k = local_metadata.local_seqused_k
-                max_seqlen_q = local_metadata.local_max_query_len
-                max_seqlen_k = local_metadata.local_max_seq_len
-                block_table = local_metadata.local_block_table
-                scheduler_metadata = local_metadata.local_scheduler_metadata
-            else:
-                cu_seqlens_q = attn_metadata.query_start_loc
-                seqused_k = attn_metadata.seq_lens
-                max_seqlen_q = attn_metadata.max_query_len
-                max_seqlen_k = attn_metadata.max_seq_len
-                block_table = attn_metadata.block_table
-                scheduler_metadata = attn_metadata.scheduler_metadata
+            if not attn_metadata.use_cascade or use_local_attn:
+                if use_local_attn:
+                    assert attn_metadata.local_attn_metadata is not None
+                    local_metadata = attn_metadata.local_attn_metadata
+                    cu_seqlens_q = local_metadata.local_query_start_loc
+                    seqused_k = local_metadata.local_seqused_k
+                    max_seqlen_q = local_metadata.local_max_query_len
+                    max_seqlen_k = local_metadata.local_max_seq_len
+                    block_table = local_metadata.local_block_table
+                    scheduler_metadata = local_metadata.local_scheduler_metadata
+                else:
+                    cu_seqlens_q = attn_metadata.query_start_loc
+                    seqused_k = attn_metadata.seq_lens
+                    max_seqlen_q = attn_metadata.max_query_len
+                    max_seqlen_k = attn_metadata.max_seq_len
+                    block_table = attn_metadata.block_table
+                    scheduler_metadata = attn_metadata.scheduler_metadata
 
-            descale_shape = (cu_seqlens_q.shape[0] - 1, key.shape[1])
+                descale_shape = (cu_seqlens_q.shape[0] - 1, key.shape[1])
 
-            flash_attn_varlen_func(
-                q=query[:num_actual_tokens],
-                k=key_cache,
-                v=value_cache,
-                out=output[:num_actual_tokens],
-                cu_seqlens_q=cu_seqlens_q,
-                max_seqlen_q=max_seqlen_q,
-                seqused_k=seqused_k,
-                max_seqlen_k=max_seqlen_k,
-                softmax_scale=self.scale,
-                causal=True,
-                alibi_slopes=self.alibi_slopes,
-                window_size=self.sliding_window,
-                block_table=block_table,
-                softcap=self.logits_soft_cap,
-                scheduler_metadata=scheduler_metadata,
-                fa_version=self.vllm_flash_attn_version,
-                q_descale=layer._q_scale.expand(descale_shape),
-                k_descale=layer._k_scale.expand(descale_shape),
-                v_descale=layer._v_scale.expand(descale_shape),
-                num_splits=attn_metadata.max_num_splits,
-            )
+                flash_attn_varlen_func(
+                    q=query[:num_actual_tokens],
+                    k=key_cache,
+                    v=value_cache,
+                    out=output[:num_actual_tokens],
+                    cu_seqlens_q=cu_seqlens_q,
+                    max_seqlen_q=max_seqlen_q,
+                    seqused_k=seqused_k,
+                    max_seqlen_k=max_seqlen_k,
+                    softmax_scale=self.scale,
+                    causal=True,
+                    alibi_slopes=self.alibi_slopes,
+                    window_size=self.sliding_window,
+                    block_table=block_table,
+                    softcap=self.logits_soft_cap,
+                    scheduler_metadata=scheduler_metadata,
+                    fa_version=self.vllm_flash_attn_version,
+                    q_descale=layer._q_scale.expand(descale_shape),
+                    k_descale=layer._k_scale.expand(descale_shape),
+                    v_descale=layer._v_scale.expand(descale_shape),
+                    num_splits=attn_metadata.max_num_splits,
+                )
             return output
 
         assert not use_local_attn, (
