@@ -103,6 +103,11 @@ KVConnectorFactory.register_connector(
     "LMCacheConnector")
 
 KVConnectorFactory.register_connector(
+    "TardisConnectorV1",
+    "vllm.distributed.kv_transfer.kv_connector.v1.tardis_connector",
+    "TardisConnectorV1")
+
+KVConnectorFactory.register_connector(
     "MooncakeStoreConnector",
     "vllm.distributed.kv_transfer.kv_connector.mooncake_store_connector",
     "MooncakeStoreConnector")
