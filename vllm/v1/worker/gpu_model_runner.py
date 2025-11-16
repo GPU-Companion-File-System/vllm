@@ -316,6 +316,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # from the KV cache of `shared_kv_cache_layers[layer_name]`.
         self.shared_kv_cache_layers: dict[str, str] = {}
 
+        self.io_budget: int = 0
+
     def _may_reorder_batch(self, scheduler_output: "SchedulerOutput") -> None:
         """
         Update the order of requests in the batch based on the attention
@@ -405,7 +407,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             sampling_params = new_req_data.sampling_params
             pooling_params = new_req_data.pooling_params
             if sampling_params and \
-                sampling_params.sampling_type == SamplingType.RANDOM_SEED:
+                    sampling_params.sampling_type == SamplingType.RANDOM_SEED:
                 generator = torch.Generator(device=self.device)
                 generator.manual_seed(sampling_params.seed)
             else:
@@ -460,7 +462,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                         second_per_grid_ts=second_per_grid_ts,
                         audio_feature_lengths=audio_feature_lengths,
                         use_audio_in_video=use_audio_in_video,
-                    )
+                )
 
             req_ids_to_add.append(req_id)
 
@@ -888,7 +890,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 src_end = num_computed_tokens + prompt_part_len
 
                 self.mrope_positions_cpu[:, dst_start:dst_end] = \
-                    req.mrope_positions[:,src_start:src_end]
+                    req.mrope_positions[:, src_start:src_end]
 
                 mrope_pos_ptr += prompt_part_len
 
@@ -1236,8 +1238,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
     ) -> ModelRunnerOutput:
         assert self.input_batch.num_reqs ==\
             len(self.input_batch.pooling_params), \
-        "Either all or none of the requests in" \
-        " a batch must be pooling request"
+            "Either all or none of the requests in" \
+            " a batch must be pooling request"
 
         extracted_hidden_states = list(
             torch.split(hidden_states[:num_scheduled_tokens],
@@ -1301,7 +1303,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # enabled collective fusion for SP
             tp_size = self.vllm_config.parallel_config.tensor_parallel_size
             if self.compilation_config.pass_config. \
-                enable_sequence_parallelism and tp_size > 1:
+                    enable_sequence_parallelism and tp_size > 1:
                 num_input_tokens = round_up(num_scheduled_tokens, tp_size)
             else:
                 num_input_tokens = num_scheduled_tokens
@@ -1364,9 +1366,13 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 num_tokens=num_input_tokens,
                 num_tokens_across_dp=num_tokens_across_dp,
                 skip_cuda_graphs=skip_cuda_graphs,
+                io_budget=self.io_budget,
         ):
             self.maybe_setup_kv_connector(scheduler_output)
             with nvtx_range(f"[model_forward], num_input_tokens={len(input_ids)}, num_req={attn_metadata['model.layers.0.self_attn.attn'].seq_lens.numel()}"):
+                # decode 阶段，best effort
+                if num_input_tokens / attn_metadata['model.layers.0.self_attn.attn'].seq_lens.numel() == 1:
+                    self.launch_io(self.io_budget)
                 model_output = self.model(
                     input_ids=input_ids,
                     positions=positions,
@@ -1687,12 +1693,30 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # These transfers are designed to be async and the requests
             # involved may be disjoint from the running requests.
             # Do this here to save a collective_rpc.
-            kv_connector.start_load_kv(get_forward_context())
+            forward_context = get_forward_context()
+            # if kv_connector.check_for_layer_need_load(""):
+            #     if forward_context.kv_load_remaining_layers == 0:
+            #         forward_context.kv_in_read = True
+            #         forward_context.kv_load_remaining_layers = len(
+            #             forward_context.no_compile_layers)
+            kv_connector.start_load_kv(forward_context)
+            # if forward_context.kv_load_remaining_layers > 0:
+            #     forward_context.kv_load_remaining_layers -= 1
+            # if forward_context.kv_load_remaining_layers == 0:
+            #     forward_context.kv_in_read = False
 
     @staticmethod
     def maybe_wait_for_kv_save() -> None:
         if has_kv_transfer_group():
             get_kv_transfer_group().wait_for_save()
+
+    @staticmethod
+    def launch_io(io_budget: Optional[int] = None) -> None:
+        if has_kv_transfer_group():
+            get_kv_transfer_group().launch_io(io_budget)
+
+    def set_io_budget(self, budget: Optional[int] = None) -> None:
+        self.io_budget = budget
 
     def propose_ngram_draft_token_ids(
         self,
@@ -2058,7 +2082,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         logits = self.model.compute_logits(hidden_states, None)
         num_reqs = logits.size(0)
 
-        dummy_tensors = lambda v: torch.full(
+        def dummy_tensors(v): return torch.full(
             (num_reqs, ), v, device=self.device)
 
         dummy_metadata = SamplingMetadata(

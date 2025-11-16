@@ -142,17 +142,24 @@ class KVConnectorBase_V1(ABC):
         Note:
             The number of elements in kv_caches and layer_names should be 
             the same.
-            
+
         """
         pass
 
     @abstractmethod
-    def wait_for_layer_load(self, layer_name: str) -> None:
+    def check_for_layer_need_load(self, layer_name: str) -> None:
+        """
+        Check if the layer needs to be loaded.
+        """
+        pass
+
+    @abstractmethod
+    def wait_for_layer_load(self, layer_name: str) -> bool:
         """
         Block until the KV for a specific layer is loaded into vLLM's
         paged buffer. This is called from within attention layer to ensure
         async copying from start_load_kv is complete.
-        
+
         This interface will be useful for layer-by-layer pipelining.
 
         Args:
@@ -178,6 +185,23 @@ class KVConnectorBase_V1(ABC):
         pass
 
     @abstractmethod
+    def save_kv_layer_async(self, layer_name: str, kv_layer: torch.Tensor,
+                            attn_metadata: "AttentionMetadata", **kwargs) -> None:
+        """
+        Start saving a layer of KV cache from vLLM's paged buffer 
+        to the connector. This is called from within attention layer to
+        enable async copying during execution.
+
+        Args:
+            layer_name (str): the name of the layer.
+            kv_layer (torch.Tensor): the paged KV buffer of the current 
+                layer in vLLM.
+            attn_metadata (AttentionMetadata): the attention metadata.
+            **kwargs: additional arguments for the save operation.
+        """
+        pass
+
+    @abstractmethod
     def wait_for_save(self):
         """
         Block until all the save operations is done. This is called
@@ -185,6 +209,17 @@ class KVConnectorBase_V1(ABC):
         from save_kv_layer is complete before finishing the forward.
 
         This prevents overwrites of paged KV buffer before saving done.
+        """
+        pass
+
+    @abstractmethod
+    def launch_io(self, budget: Optional[int] = None) -> None:
+        """
+        Launch the IO for the connector.
+
+        Args:
+            budget (Optional[int]): the IO budget. This is the number of
+                tokens that can be loaded from the external KV cache.
         """
         pass
 
@@ -219,7 +254,7 @@ class KVConnectorBase_V1(ABC):
         """
         Get number of new tokens that can be loaded from the
         external KV cache beyond the num_computed_tokens.
-        
+
         Args:
             request (Request): the request object.
             num_computed_tokens (int): the number of locally

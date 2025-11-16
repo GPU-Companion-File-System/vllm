@@ -112,6 +112,9 @@ class CPUWorker(Worker):
         assert isinstance(output, ModelRunnerOutput)
         return output if self.is_driver_worker else None
 
+    def set_io_budget(self, budget: Optional[int] = None) -> None:
+        self.model_runner.set_io_budget(budget)
+
     def get_cpus_id_binding_based_on_numa_nodes(self) -> str:
         """Return CPUs id binding based on NUMA nodes.
         """

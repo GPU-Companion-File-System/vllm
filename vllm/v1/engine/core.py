@@ -57,6 +57,7 @@ PROFILE_START_STOP_ENV_VAR_NAME = "VLLM_PROFILE_START_STOP"
 
 _R = TypeVar('_R')  # Return type for collective_rpc
 
+
 @functools.cache
 def _load_iteration_indexes(env_var: str):
     spans = os.environ.get(env_var, None)
@@ -82,6 +83,7 @@ def _load_iteration_indexes(env_var: str):
 
     return frozenset(starts), frozenset(stops)
 
+
 class EngineCore:
     """Inner loop of vLLM's Engine."""
 
@@ -90,7 +92,7 @@ class EngineCore:
                  executor_class: type[Executor],
                  log_stats: bool,
                  executor_fail_callback: Optional[Callable] = None):
-         # profile config
+        # profile config
         self.profile_start_iters, self.profile_stop_iters = _load_iteration_indexes(
             PROFILE_START_STOP_ENV_VAR_NAME)
         # plugins need to be loaded at the engine/scheduler level too
@@ -264,6 +266,14 @@ class EngineCore:
         if not self.scheduler.has_requests():
             return {}, False
         scheduler_output = self.scheduler.schedule()
+
+        def is_prefill(scheduler_output: SchedulerOutput) -> bool:
+            return scheduler_output.total_num_scheduled_tokens / len(scheduler_output.num_scheduled_tokens) > 2
+        if scheduler_output.total_num_scheduled_tokens > 0:
+            if is_prefill(scheduler_output):
+                self.model_executor.set_io_budget(16)
+            else:
+                self.model_executor.set_io_budget(2)
         model_output = self.execute_model(scheduler_output)
         engine_core_outputs = self.scheduler.update_from_output(
             scheduler_output, model_output)  # type: ignore
@@ -299,7 +309,6 @@ class EngineCore:
                 future = self.model_executor.execute_model(scheduler_output)
                 self.batch_queue.put_nowait(
                     (future, scheduler_output))  # type: ignore
-
         scheduled_batch = (scheduler_output is not None
                            and scheduler_output.total_num_scheduled_tokens > 0)
 
@@ -328,10 +337,11 @@ class EngineCore:
 
     def profile(self, is_start: bool = True):
         self.model_executor.profile(is_start)
-    
+
     @contextmanager
     def cuda_profile_step(self):
         it = -1
+
         def profile_step():
             nonlocal it
             if it in self.profile_stop_iters:
@@ -342,7 +352,7 @@ class EngineCore:
             if it in self.profile_start_iters:
                 torch.cuda.cudart().cudaProfilerStart()
                 logger.info(f"Profiling started at iteration {it}.")
-                
+
         try:
             yield profile_step
         finally:
@@ -428,7 +438,7 @@ class EngineCoreProc(EngineCore):
         self.input_queue = queue.Queue[tuple[EngineCoreRequestType, Any]]()
         self.output_queue = queue.Queue[Union[tuple[int, EngineCoreOutputs],
                                               bytes]]()
-        executor_fail_callback = lambda: self.input_queue.put_nowait(
+        def executor_fail_callback(): return self.input_queue.put_nowait(
             (EngineCoreRequestType.EXECUTOR_FAILED, b''))
 
         self.engine_index = engine_index

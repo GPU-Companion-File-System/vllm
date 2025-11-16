@@ -147,7 +147,7 @@ class Worker(WorkerBase):
             self.requested_memory = (self.init_snapshot.total_memory *
                                      self.cache_config.gpu_memory_utilization)
             if self.init_snapshot.free_memory < self.requested_memory:
-                GiB = lambda b: round(b / GiB_bytes, 2)
+                def GiB(b): return round(b / GiB_bytes, 2)
                 raise ValueError(
                     f"Free memory on device "
                     f"({GiB(self.init_snapshot.free_memory)}/"
@@ -211,7 +211,7 @@ class Worker(WorkerBase):
         """
         torch.cuda.empty_cache()
         torch.cuda.reset_peak_memory_stats()
-        GiB = lambda b: b / GiB_bytes
+        def GiB(b): return b / GiB_bytes
 
         # Execute a forward pass with dummy inputs to profile the memory usage
         # of the model.
@@ -325,7 +325,7 @@ class Worker(WorkerBase):
 
         parallel_config = self.vllm_config.parallel_config
         if parallel_config.distributed_executor_backend != "external_launcher" \
-            and not get_pp_group().is_last_rank:
+                and not get_pp_group().is_last_rank:
             assert isinstance(output, IntermediateTensors)
             get_pp_group().send_tensor_dict(output.tensors,
                                             all_gather_group=get_tp_group())
@@ -360,6 +360,9 @@ class Worker(WorkerBase):
             self.profiler.stop()
             print(self.profiler.key_averages().table(
                 sort_by="self_cuda_time_total"))
+
+    def set_io_budget(self, budget: Optional[int] = None) -> None:
+        self.model_runner.set_io_budget(budget)
 
     def execute_dummy_batch(self) -> None:
         self.model_runner._dummy_run(1)

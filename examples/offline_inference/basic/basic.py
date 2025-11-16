@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import os
+import torch
 from vllm import LLM, SamplingParams
 from transformers import AutoTokenizer
 from vllm.config import KVTransferConfig
@@ -9,11 +11,8 @@ ktc = KVTransferConfig(
     kv_role="kv_both",
 )
 
-import torch
 
-import os
-
-os.environ["TARDIS_CONFIG_FILE"] = "/home/wxt/open_sources/scripts/tardis_config.yaml"
+os.environ["TARDIS_CONFIG_FILE"] = "/home/zwh/open_sources/scripts/tardis_config.yaml"
 os.environ["LMCACHE_CONFIG_FILE"] = "/home/wxt/open_sources/scripts/lmcache_config.yaml"
 os.environ["LMCACHE_USE_EXPERIMENTAL"] = "True"
 os.environ["VLLM_USE_V1"] = "1"
@@ -30,7 +29,8 @@ with open("/home/wxt/open_sources/vllm/examples/offline_inference/basic/man-bash
 # use more of the long context
 long_context = long_context[:155000]
 
-tokenizer = AutoTokenizer.from_pretrained("/home/wxt/models/Llama-3.1-8B-Instruct")
+tokenizer = AutoTokenizer.from_pretrained(
+    "/home/wxt/models/Llama-3.1-8B-Instruct")
 question = "Summarize bash in 2 sentences."
 
 prompt = f"{long_context}\n\n{question}"
@@ -60,22 +60,22 @@ sampling_params = SamplingParams(
     temperature=0.8, top_p=0.95,
     # max_tokens=1024,
     # ignore_eos=True,
-    # stop=None 
-    )
+    # stop=None
+)
 
 
 def main():
     # Create an LLM.
     llm = LLM(model="/home/wxt/models/Llama-3.1-8B-Instruct",
-            enforce_eager=True, enable_prefix_caching=False,
-            kv_transfer_config=ktc, block_size=256,
-            max_num_batched_tokens=131072, max_model_len=131072)
+              enforce_eager=True, enable_prefix_caching=False,
+              kv_transfer_config=ktc, block_size=256,
+              max_num_batched_tokens=131072, max_model_len=131072)
 
     # llm = LLM(model="/home/wxt/models/Llama-3.1-8B-Instruct",
-    #         enforce_eager=True, 
+    #         enforce_eager=True,
     #         # tensor_parallel_size=2,
     #         max_num_batched_tokens=131072, max_model_len=131072)
-    
+
     # Generate texts from the prompts.
     # The output is a list of RequestOutput objects
     # that contain the prompt, generated text, and other information.
@@ -87,7 +87,7 @@ def main():
         generated_text = output.outputs[0].text
         print(f"Output:    {generated_text!r}")
         print("-" * 60)
-    
+
     # outputs = llm.generate(prompts, sampling_params)
     # # Print the outputs.
     # print("\nGenerated Outputs:\n" + "-" * 60)

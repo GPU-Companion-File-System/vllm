@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from concurrent.futures import Future
-from typing import Callable, Union
+from typing import Callable, Union, Optional
 
 import torch
 import torch.distributed as dist
@@ -94,6 +94,11 @@ class Executor(ExecutorBase):
 
     def profile(self, is_start: bool = True):
         self.collective_rpc("profile", args=(is_start, ))
+
+    # Async IO control: fan-out a non-blocking hint to workers to advance IO.
+    def set_io_budget(self, budget: Optional[int] = None) -> None:
+        # Fire-and-forget; workers may ignore if unsupported.
+        self.collective_rpc("set_io_budget", args=(budget, ))
 
 
 class UniProcExecutor(UniProcExecutorV0, Executor):

@@ -370,7 +370,23 @@ def wait_for_kv_layer_from_connector(layer_name: str):
     if attn_metadata is None:
         return
     assert isinstance(attn_metadata, dict)
-    connector.wait_for_layer_load(layer_name)
+
+    need_load = connector.check_for_layer_need_load(layer_name)
+    if need_load:
+        # First layer entering the load-wait phase in this forward pass.
+        if forward_context.kv_load_remaining_layers == 0:
+            forward_context.kv_in_read = True
+            forward_context.kv_load_remaining_layers = len(
+                forward_context.no_compile_layers)
+        connector.wait_for_layer_load(layer_name)
+        # Decrement remaining layer count; clear in_read when the last layer finishes.
+        if forward_context.kv_load_remaining_layers > 0:
+            forward_context.kv_load_remaining_layers -= 1
+        if forward_context.kv_load_remaining_layers == 0:
+            forward_context.kv_in_read = False
+            # 当读完成，出现状态转变，启动 IO，但要保证在预算内，避免超出prefill时间片
+            if forward_context.io_budget > 0:
+                connector.launch_io(forward_context.io_budget)
 
 
 def maybe_save_kv_layer_to_connector(
@@ -387,8 +403,15 @@ def maybe_save_kv_layer_to_connector(
     if attn_metadata is None:
         return
     assert isinstance(attn_metadata, dict)
-    connector.save_kv_layer(layer_name, kv_cache_layer,
-                            attn_metadata[layer_name])
+    per_layer_metadata = attn_metadata[layer_name]
+    # If we are in the read phase (loads pending across layers),
+    # prefer async saving to overlap IO; otherwise do sync save.
+    if forward_context.kv_in_read and hasattr(connector, "save_kv_layer_async"):
+        connector.save_kv_layer_async(layer_name, kv_cache_layer,
+                                      per_layer_metadata)
+    else:
+        connector.save_kv_layer(layer_name, kv_cache_layer,
+                                per_layer_metadata)
 
 
 def unified_attention(

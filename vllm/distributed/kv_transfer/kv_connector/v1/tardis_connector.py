@@ -46,16 +46,22 @@ class TardisConnectorV1(KVConnectorBase_V1):
         Note:
             The number of elements in kv_caches and layer_names should be 
             the same.
-            
+
         """
         self._tardis_engine.start_load_kv(forward_context, **kwargs)
+
+    def check_for_layer_need_load(self, layer_name: str) -> None:
+        """
+        Check if the layer needs to be loaded.
+        """
+        return self._tardis_engine.check_for_layer_need_load(layer_name)
 
     def wait_for_layer_load(self, layer_name: str) -> None:
         """
         Block until the KV for a specific layer is loaded into vLLM's
         paged buffer. This is called from within attention layer to ensure
         async copying from start_load_kv is complete.
-        
+
         This interface will be useful for layer-by-layer pipelining.
 
         Args:
@@ -78,7 +84,18 @@ class TardisConnectorV1(KVConnectorBase_V1):
             **kwargs: additional arguments for the save operation.
         """
         self._tardis_engine.save_kv_layer(layer_name, kv_layer, attn_metadata,
-                                           **kwargs)
+                                          **kwargs)
+
+    def save_kv_layer_async(self,
+                            layer_name: str,
+                            kv_layer: torch.Tensor,
+                            attn_metadata: "AttentionMetadata",
+                            **kwargs) -> None:
+        self._tardis_engine.save_kv_layer_async(layer_name, kv_layer, attn_metadata,
+                                                **kwargs)
+
+    def launch_io(self, budget: Optional[int] = None) -> None:
+        self._tardis_engine.launch_io(budget)
 
     def wait_for_save(self):
         """
@@ -117,7 +134,7 @@ class TardisConnectorV1(KVConnectorBase_V1):
         """
         Get number of new tokens that can be loaded from the
         external KV cache beyond the num_computed_tokens.
-        
+
         Args:
             request (Request): the request object.
             num_computed_tokens (int): the number of locally
@@ -137,7 +154,7 @@ class TardisConnectorV1(KVConnectorBase_V1):
         Update KVConnector state after block allocation.
         """
         self._tardis_engine.update_state_after_alloc(request,
-                                                      num_external_tokens)
+                                                     num_external_tokens)
 
     def build_connector_meta(
             self, scheduler_output: SchedulerOutput) -> KVConnectorMetadata:
