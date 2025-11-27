@@ -44,17 +44,9 @@ prompt5 = f"{long_context[:75000]} {long_context[1:75000]}\n\n{question}"
 prompt6 = f"{long_context[:75000]} {long_context[2:75000]}\n\n{question}"
 
 print(f"Prompt length: {len(tokenizer.encode(prompt))} tokens")
-
+prompt7 = f"{long_context[4:]}\n\n{question}"
 # Sample prompts.
 prompts = [
-    prompt,
-    prompt,
-    prompt,
-    prompt,
-    prompt,
-    prompt,
-    prompt,
-    prompt,
     prompt,
     prompt,
     prompt,
@@ -62,6 +54,12 @@ prompts = [
     # prompt4,
     # prompt5,
     # prompt6,
+]
+prompts2 = [
+    prompt2,
+    prompt2,
+    prompt2,
+    prompt7,
 ]
 # Create a sampling params object.
 sampling_params = SamplingParams(
@@ -89,6 +87,14 @@ def main():
     # that contain the prompt, generated text, and other information.
     torch.cuda.cudart().cudaProfilerStart()
     outputs = llm.generate(prompts, sampling_params)
+    # Print the outputs.
+    print("\nGenerated Outputs:\n" + "-" * 60)
+    for output in outputs:
+        generated_text = output.outputs[0].text
+        print(f"Output:    {generated_text!r}")
+        print("-" * 60)
+
+    outputs = llm.generate(prompts2, sampling_params)
     # Print the outputs.
     print("\nGenerated Outputs:\n" + "-" * 60)
     for output in outputs:
