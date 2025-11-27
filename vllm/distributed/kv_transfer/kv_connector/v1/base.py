@@ -185,7 +185,7 @@ class KVConnectorBase_V1(ABC):
         pass
 
     @abstractmethod
-    def save_kv_layer_async(self, layer_name: str, kv_layer: torch.Tensor,
+    def save_kv_layer_async(self, layer_name: str, kv_layer: torch.Tensor, completion_event: torch.Event,
                             attn_metadata: "AttentionMetadata", **kwargs) -> None:
         """
         Start saving a layer of KV cache from vLLM's paged buffer 
@@ -196,6 +196,7 @@ class KVConnectorBase_V1(ABC):
             layer_name (str): the name of the layer.
             kv_layer (torch.Tensor): the paged KV buffer of the current 
                 layer in vLLM.
+            completion_event (torch.Event): the event to signal the completion of the save operation.
             attn_metadata (AttentionMetadata): the attention metadata.
             **kwargs: additional arguments for the save operation.
         """

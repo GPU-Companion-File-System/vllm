@@ -271,7 +271,7 @@ class EngineCore:
             return scheduler_output.total_num_scheduled_tokens / len(scheduler_output.num_scheduled_tokens) > 2
         if scheduler_output.total_num_scheduled_tokens > 0:
             if is_prefill(scheduler_output):
-                self.model_executor.set_io_budget(16)
+                self.model_executor.set_io_budget(12)
             else:
                 self.model_executor.set_io_budget(2)
         model_output = self.execute_model(scheduler_output)

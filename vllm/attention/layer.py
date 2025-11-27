@@ -392,6 +392,7 @@ def wait_for_kv_layer_from_connector(layer_name: str):
 def maybe_save_kv_layer_to_connector(
     layer_name: str,
     kv_cache_layer: List[torch.Tensor],
+    completion_event=None,
 ):
     if not has_kv_transfer_group() or not is_v1_kv_transfer_group():
         return
@@ -407,7 +408,10 @@ def maybe_save_kv_layer_to_connector(
     # If we are in the read phase (loads pending across layers),
     # prefer async saving to overlap IO; otherwise do sync save.
     if forward_context.kv_in_read and hasattr(connector, "save_kv_layer_async"):
-        connector.save_kv_layer_async(layer_name, kv_cache_layer,
+        assert completion_event is not None
+        connector.save_kv_layer_async(layer_name,
+                                      kv_cache_layer,
+                                      completion_event,
                                       per_layer_metadata)
     else:
         connector.save_kv_layer(layer_name, kv_cache_layer,
@@ -431,7 +435,18 @@ def unified_attention(
     output = self.impl.forward(self, query, key, value, kv_cache,
                                attn_metadata)
 
-    maybe_save_kv_layer_to_connector(layer_name, kv_cache)
+    # Create an event to signal that all kernels enqueued by this layer's
+    # forward have completed on the current stream. The connector can use
+    # this to synchronize async IO.
+    try:
+        completion_event = torch.cuda.Event(
+            blocking=False, enable_timing=False)
+        torch.cuda.current_stream().record_event(completion_event)
+    except Exception:
+        completion_event = None
+
+    maybe_save_kv_layer_to_connector(layer_name, kv_cache,
+                                     completion_event=completion_event)
     return output
 
 
@@ -477,7 +492,17 @@ def unified_attention_with_output(
                       output=output,
                       output_scale=output_scale)
 
-    maybe_save_kv_layer_to_connector(layer_name, kv_cache)
+    # Create an event to signal this layer's forward completion.
+    try:
+        completion_event = torch.cuda.Event(
+            blocking=False, enable_timing=False)
+        torch.cuda.current_stream().record_event(completion_event)
+    except Exception:
+        completion_event = None
+
+    maybe_save_kv_layer_to_connector(layer_name,
+                                     kv_cache,
+                                     completion_event=completion_event)
 
 
 def unified_attention_with_output_fake(

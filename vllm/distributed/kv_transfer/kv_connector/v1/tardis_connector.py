@@ -89,9 +89,10 @@ class TardisConnectorV1(KVConnectorBase_V1):
     def save_kv_layer_async(self,
                             layer_name: str,
                             kv_layer: torch.Tensor,
+                            completion_event: torch.Event,
                             attn_metadata: "AttentionMetadata",
                             **kwargs) -> None:
-        self._tardis_engine.save_kv_layer_async(layer_name, kv_layer, attn_metadata,
+        self._tardis_engine.save_kv_layer_async(layer_name, kv_layer, completion_event, attn_metadata,
                                                 **kwargs)
 
     def launch_io(self, budget: Optional[int] = None) -> None:
