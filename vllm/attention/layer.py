@@ -383,10 +383,9 @@ def wait_for_kv_layer_from_connector(layer_name: str):
         if forward_context.kv_load_remaining_layers > 0:
             forward_context.kv_load_remaining_layers -= 1
         if forward_context.kv_load_remaining_layers == 0:
-            forward_context.kv_in_read = False
-            # 当读完成，出现状态转变，启动 IO，但要保证在预算内，避免超出prefill时间片
-            if forward_context.io_budget > 0:
-                connector.launch_io(forward_context.io_budget)
+            # Don't clear kv_in_read here. Last layer's write hasn't been
+            # scheduled yet; mark pending and defer launch_io until after write.
+            forward_context.kv_pending_last_write = True
 
 
 def maybe_save_kv_layer_to_connector(
@@ -413,6 +412,13 @@ def maybe_save_kv_layer_to_connector(
                                       kv_cache_layer,
                                       completion_event,
                                       per_layer_metadata)
+        # If this was the last layer (read finished earlier), now we can
+        # transition out of read phase and trigger IO within budget.
+        if forward_context.kv_pending_last_write:
+            forward_context.kv_pending_last_write = False
+            forward_context.kv_in_read = False
+            if forward_context.io_budget > 0:
+                connector.launch_io(forward_context.io_budget)
     else:
         connector.save_kv_layer(layer_name, kv_cache_layer,
                                 per_layer_metadata)

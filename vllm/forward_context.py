@@ -98,6 +98,9 @@ class ForwardContext:
     # KV transfer: reading state within a forward pass
     kv_in_read: bool = False
     kv_load_remaining_layers: int = 0
+    # Mark that we've finished all loads but the last layer's write is pending.
+    kv_pending_last_write: bool = False
+    # Optional IO budget for connector.launch_io after read->write phase shift.
     io_budget: int = 0
 
 

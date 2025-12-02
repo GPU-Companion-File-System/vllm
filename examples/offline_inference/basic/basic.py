@@ -37,30 +37,54 @@ prompt = f"{long_context}\n\n{question}"
 prompt1 = f"{long_context[1:]}\n\n{question}"
 prompt2 = f"{long_context[2:]}\n\n{question}"
 prompt3 = f"{long_context[3:]}\n\n{question}"
-
+prompt7 = f"{long_context[4:]}\n\n{question}"
+prompt8 = f"{long_context[5:]}\n\n{question}"
+prompt9 = f"{long_context[6:]}\n\n{question}"
+prompt10 = f"{long_context[7:]}\n\n{question}"
 prompt4 = f"{long_context[:75000]} {long_context[:75000]}\n\n{question}"
 
 prompt5 = f"{long_context[:75000]} {long_context[1:75000]}\n\n{question}"
 prompt6 = f"{long_context[:75000]} {long_context[2:75000]}\n\n{question}"
 
 print(f"Prompt length: {len(tokenizer.encode(prompt))} tokens")
-prompt7 = f"{long_context[4:]}\n\n{question}"
+
+cutoff_index = int(len(long_context) * 0.95)
+prompt_ = f"{long_context[:cutoff_index]}\n\n{question}"
+# prompts = [
+#     prompt,
+#     prompt,
+#     prompt,
+#     prompt3
+# ]
 # Sample prompts.
 prompts = [
     prompt,
-    prompt,
-    prompt,
+    prompt1,
+    prompt2,
     prompt3,
     # prompt4,
     # prompt5,
     # prompt6,
 ]
+# 0% 复用
+
 prompts2 = [
+    prompt,
+    prompt1,
     prompt2,
-    prompt2,
-    prompt2,
-    prompt7,
+    prompt5,
 ]
+# 100% 复用
+
+# prompts3 = [
+#     prompt7,
+#     prompt8,
+#     prompt9,
+#     prompt10,
+#     # prompt4,
+#     # prompt5,
+#     # prompt6,
+# ]
 # Create a sampling params object.
 sampling_params = SamplingParams(
     temperature=0.8, top_p=0.95,
@@ -101,6 +125,14 @@ def main():
         generated_text = output.outputs[0].text
         print(f"Output:    {generated_text!r}")
         print("-" * 60)
+
+    # outputs = llm.generate(prompts3, sampling_params)
+    # # Print the outputs.
+    # print("\nGenerated Outputs:\n" + "-" * 60)
+    # for output in outputs:
+    #     generated_text = output.outputs[0].text
+    #     print(f"Output:    {generated_text!r}")
+    #     print("-" * 60)
 
     # outputs = llm.generate(prompts, sampling_params)
     # # Print the outputs.
