@@ -12,9 +12,8 @@ ktc = KVTransferConfig(
 import torch
 
 import os
-
-os.environ["TARDIS_CONFIG_FILE"] = "/home/wxt/open_sources/scripts/tardis_config.yaml"
-os.environ["LMCACHE_CONFIG_FILE"] = "/home/wxt/open_sources/scripts/lmcache_config.yaml"
+os.environ["TARDIS_CONFIG_FILE"] = "/home/hyf/infinikv/lmcache-dev/configs/tardis_config.yaml"
+os.environ["LMCACHE_CONFIG_FILE"] = "/home/hyf/infinikv/lmcache-dev/configs/lmcache_config.yaml"
 os.environ["LMCACHE_USE_EXPERIMENTAL"] = "True"
 os.environ["VLLM_USE_V1"] = "1"
 os.environ["VLLM_ENABLE_V1_MULTIPROCESSING"] = "1"
@@ -22,15 +21,19 @@ os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
 os.environ["VLLM_FLASH_ATTN_VERSION"] = "3"
 
 long_context = ""
-with open("/home/wxt/open_sources/vllm/examples/offline_inference/basic/man-bash.txt", "r") as f:
+with open("/home/hyf/infinikv/vllm/examples/offline_inference/basic/man-bash.txt", "r") as f:
     long_context = f.read()
 
 # a truncation of the long context for the --max-model-len 16384
 # if you increase the --max-model-len, you can decrease the truncation i.e.
 # use more of the long context
 long_context = long_context[:155000]
+model_path = "/data/models/qwen3_next/"
+# add model path
+tokenizer = AutoTokenizer.from_pretrained(model_path)
 
-tokenizer = AutoTokenizer.from_pretrained("/home/wxt/models/Llama-3.1-8B-Instruct")
+# TODO： add support for qwen3-next
+
 question = "Summarize bash in 2 sentences."
 
 prompt = f"{long_context}\n\n{question}"
@@ -66,10 +69,10 @@ sampling_params = SamplingParams(
 
 def main():
     # Create an LLM.
-    llm = LLM(model="/home/wxt/models/Llama-3.1-8B-Instruct",
+    llm = LLM(model=model_path,
             enforce_eager=True, enable_prefix_caching=False,
             kv_transfer_config=ktc, block_size=256,
-            max_num_batched_tokens=131072, max_model_len=131072)
+            max_num_batched_tokens=131072, max_model_len=131072,trust_remote_code=True)
 
     # llm = LLM(model="/home/wxt/models/Llama-3.1-8B-Instruct",
     #         enforce_eager=True, 

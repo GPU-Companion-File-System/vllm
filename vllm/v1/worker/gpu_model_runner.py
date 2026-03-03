@@ -1366,7 +1366,27 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 skip_cuda_graphs=skip_cuda_graphs,
         ):
             self.maybe_setup_kv_connector(scheduler_output)
-            with nvtx_range(f"[model_forward], num_input_tokens={len(input_ids)}, num_req={attn_metadata['model.layers.0.self_attn.attn'].seq_lens.numel()}"):
+            # Get num_req in a way compatible with both FlashAttention and FlashMLA
+            from vllm.attention.backends.flashmla import FlashMLAMetadata
+            attn_meta = attn_metadata['model.layers.0.self_attn.attn']
+            if isinstance(attn_meta, FlashMLAMetadata):
+                # FlashMLA uses seq_lens (List[int]) or seq_lens_tensor
+                if attn_meta.seq_lens_tensor is not None:
+                    num_req = attn_meta.seq_lens_tensor.shape[0]
+                elif attn_meta.seq_lens is not None:
+                    num_req = len(attn_meta.seq_lens)
+                else:
+                    num_req = self.input_batch.num_reqs
+            else:
+                # FlashAttention and other backends use seq_lens tensor
+                if hasattr(attn_meta, 'seq_lens') and attn_meta.seq_lens is not None:
+                    if isinstance(attn_meta.seq_lens, torch.Tensor):
+                        num_req = attn_meta.seq_lens.numel()
+                    else:
+                        num_req = len(attn_meta.seq_lens)
+                else:
+                    num_req = self.input_batch.num_reqs
+            with nvtx_range(f"[model_forward], num_input_tokens={len(input_ids)}, num_req={num_req}"):
                 model_output = self.model(
                     input_ids=input_ids,
                     positions=positions,
