@@ -1,0 +1,7 @@
+chunk_size: 256
+max_num_local_file: 512
+max_local_disk_size: 32
+sys_config_path: "/home/zwh/lmcache-dev/csrc/GeminiFS/test/io_deamon/sys_config.ini"
+storage_backend: "geminifs"
+extra_config:
+  geminifs_reset: true
