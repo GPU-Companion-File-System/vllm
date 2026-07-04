@@ -117,6 +117,15 @@ repeat4 结果：
 3. 后续优化重点放在 UB xfer/daemon scheduling，不再优先做 metadata 微优化。
 4. async/persistent 方向需要重新设计 daemon residency，不能沿用当前 async1 直接让 daemon kernel 和模型 compute 常驻重叠的方案。
 
+## 复现辅助
+
+- 机器可读结果表：
+  `/home/zwh/lmcache-dev/benchmarks/geminifs_ub/results_20260704.json`
+- 跑新 benchmark 前的环境检查：
+  `/home/zwh/lmcache-dev/benchmarks/geminifs_ub/check_ub_bench_env.sh`
+
+当前这台机器运行环境检查会失败，因为 GPU 仍有 Nsight/CUPTI 残留。重启或驱动级恢复后，先确认该检查通过，再采集新的 UB/DRAM/GeminiFS 对比数字。
+
 ## 关键提交
 
 - `ac15c6c perf: batch GeminiFS UB pool transfers`
@@ -125,4 +134,3 @@ repeat4 结果：
 - `52eb954 perf: add opt-in UB bulk load`
 - `aa6f522 bench: add UB block size tuning result`
 - `c3ac1ce docs: record UB block1024 smoke hang`
-
