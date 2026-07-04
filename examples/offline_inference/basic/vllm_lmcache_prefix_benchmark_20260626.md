@@ -2,6 +2,11 @@
 
 Date: 2026-06-26
 
+> Status: historical baseline only. This document records the early UB
+> implementation before the later batch, block-pointer, and bulk-load
+> optimizations. For the current performance claim and reporting numbers, use
+> `vllm_lmcache_ub_perf_report_20260704.md`.
+
 ## Setup
 
 - Model: `/data/models/Llama-3.1-8B-Instruct`
