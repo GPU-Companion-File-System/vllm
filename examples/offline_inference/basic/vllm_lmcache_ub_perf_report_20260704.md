@@ -123,6 +123,8 @@ repeat4 结果：
   `/home/zwh/lmcache-dev/benchmarks/geminifs_ub/results_20260704.json`
 - Markdown 摘要生成：
   `/home/zwh/lmcache-dev/benchmarks/geminifs_ub/summarize_results.py`
+- Nsight SQLite profile 摘要生成：
+  `/home/zwh/lmcache-dev/benchmarks/geminifs_ub/summarize_nsys_profile.py`
 - 跑新 benchmark 前的环境检查：
   `/home/zwh/lmcache-dev/benchmarks/geminifs_ub/check_ub_bench_env.sh`
 
