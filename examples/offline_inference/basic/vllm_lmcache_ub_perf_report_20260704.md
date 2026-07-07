@@ -2,6 +2,10 @@
 
 日期：2026-07-04
 
+> 当前最新 128K 性能结论见
+> `vllm_lmcache_ub_perf_report_20260707.md`。本文保留 2026-07-04
+> clean run 的历史结果。
+
 ## 结论
 
 当前 UB 后端已经跑通真实 vLLM prefix reuse 推理链路，并且在 128K 复用前缀 benchmark 上达到 DRAM-level warm-load 延迟，稳定快于当前 GeminiFS 和 SSD。
