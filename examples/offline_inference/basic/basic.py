@@ -16,15 +16,16 @@ import json
 from pathlib import Path
 import time
 
+SCRIPT_DIR = Path(__file__).resolve().parent
+
 MODEL_PATH = os.environ.get(
     "BASIC_MODEL_PATH", "/data/models/Llama-3.1-8B-Instruct")
 TARDIS_CONFIG_FILE = os.environ.get(
-    "TARDIS_CONFIG_FILE", "/home/zwh/open_sources/scripts/tardis_config.yaml")
+    "TARDIS_CONFIG_FILE", str(SCRIPT_DIR / "tardis_tutti_ub_smoke_config.yaml"))
 LMCACHE_CONFIG_FILE = os.environ.get(
-    "LMCACHE_CONFIG_FILE", "/home/zwh/open_sources/scripts/lmcache_config.yaml")
+    "LMCACHE_CONFIG_FILE", "/dev/null")
 MAN_BASH_PATH = os.environ.get(
-    "MAN_BASH_PATH",
-    "/home/zwh/vllm/examples/offline_inference/basic/man-bash.txt")
+    "MAN_BASH_PATH", str(SCRIPT_DIR / "man-bash.txt"))
 CONTEXT_CHARS = int(os.environ.get("BASIC_CONTEXT_CHARS", "155000"))
 NUM_PROMPTS = int(os.environ.get("BASIC_NUM_PROMPTS", "4"))
 MAX_MODEL_LEN = int(os.environ.get("BASIC_MAX_MODEL_LEN", "131072"))

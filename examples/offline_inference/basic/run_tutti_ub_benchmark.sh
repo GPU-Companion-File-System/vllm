@@ -4,7 +4,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 VLLM_ROOT="$(cd "${SCRIPT_DIR}/../../.." && pwd)"
 LMCACHE_ROOT="${LMCACHE_ROOT:-${VLLM_ROOT}/../lmcache-tutti-ub}"
-PYTHON="${PYTHON:-/home/zwh/.conda/envs/zwhtest/bin/python}"
+PYTHON="${PYTHON:-python3}"
 MODEL_PATH="${BASIC_MODEL_PATH:-/data/models/Llama-3.1-8B-Instruct}"
 OUTPUT_DIR="${TUTTI_VLLM_OUTPUT_DIR:-/tmp/tutti-vllm-benchmark}"
 RUN_ID="${TUTTI_VLLM_RUN_ID:-$(date -u +%Y%m%dT%H%M%SZ)}"

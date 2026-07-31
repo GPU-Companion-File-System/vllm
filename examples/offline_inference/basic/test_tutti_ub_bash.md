@@ -8,7 +8,8 @@
 export CUDA_MODULE_LOADING=EAGER
 export SNVME_KERNEL_VERSION=5.15.0-public
 
-cd /home/zwh/lmcache-tutti-ub
+export LMCACHE_ROOT="${LMCACHE_ROOT:-/path/to/lmcache-tutti-ub}"
+cd "$LMCACHE_ROOT"
 ./scripts/build_tutti_lmcache.sh
 
 sudo -E csrc/GeminiFS/build/bin/nvmeservice_daemon \
@@ -18,13 +19,15 @@ sudo -E csrc/GeminiFS/build/bin/nvmeservice_daemon \
 另一个终端启动 vLLM smoke：
 
 ```bash
-conda activate zwhtest
-cd /home/zwh/vllm-tutti-ub
+export VLLM_ROOT="${VLLM_ROOT:-/path/to/vllm-tutti-ub}"
+export PYTHON="${PYTHON:-python3}"
+export BASIC_MODEL_PATH="${BASIC_MODEL_PATH:-/path/to/model}"
+cd "$VLLM_ROOT"
 
 CUDA_MODULE_LOADING=EAGER \
 CUDA_VISIBLE_DEVICES=0,1 \
 PYTHONUNBUFFERED=1 \
-BASIC_MODEL_PATH=/data/models/Llama-3.1-8B-Instruct \
+BASIC_MODEL_PATH="$BASIC_MODEL_PATH" \
 BASIC_CONTEXT_CHARS=512 \
 BASIC_NUM_PROMPTS=1 \
 BASIC_NUM_RUNS=2 \
@@ -34,10 +37,10 @@ BASIC_MAX_MODEL_LEN=2048 \
 BASIC_MAX_NUM_BATCHED_TOKENS=2048 \
 BASIC_MAX_TOKENS=4 \
 BASIC_GPU_MEMORY_UTILIZATION=0.45 \
-TARDIS_CONFIG_FILE=/home/zwh/vllm-tutti-ub/examples/offline_inference/basic/tardis_tutti_ub_smoke_config.yaml \
-PYTHONPATH=/home/zwh/vllm-tutti-ub:/home/zwh/lmcache-tutti-ub \
-LD_LIBRARY_PATH=/home/zwh/lmcache-tutti-ub/csrc/GeminiFS/build/lib:$LD_LIBRARY_PATH \
-/home/zwh/.conda/envs/zwhtest/bin/python \
+TARDIS_CONFIG_FILE="$VLLM_ROOT/examples/offline_inference/basic/tardis_tutti_ub_smoke_config.yaml" \
+PYTHONPATH="$VLLM_ROOT:$LMCACHE_ROOT" \
+LD_LIBRARY_PATH="$LMCACHE_ROOT/csrc/GeminiFS/build/lib:${LD_LIBRARY_PATH:-}" \
+"$PYTHON" \
 examples/offline_inference/basic/basic.py
 ```
 
@@ -52,7 +55,7 @@ examples/offline_inference/basic/basic.py
 ```bash
 export CUDA_MODULE_LOADING=EAGER
 export SNVME_KERNEL_VERSION=5.15.0-public
-export BASIC_MODEL_PATH=/data/models/Llama-3.1-8B-Instruct
+export BASIC_MODEL_PATH="${BASIC_MODEL_PATH:-/data/models/Llama-3.1-8B-Instruct}"
 export BASIC_TENSOR_PARALLEL_SIZE=2
 export BASIC_PREFIX_MODE=full
 export BASIC_CONTEXT_CHARS=512
