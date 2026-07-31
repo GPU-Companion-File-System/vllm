@@ -60,9 +60,9 @@ ktc = KVTransferConfig(kv_connector=KV_CONNECTOR, kv_role="kv_both")
 os.environ["TARDIS_CONFIG_FILE"] = TARDIS_CONFIG_FILE
 os.environ["LMCACHE_CONFIG_FILE"] = LMCACHE_CONFIG_FILE
 os.environ["LMCACHE_USE_EXPERIMENTAL"] = "True"
-os.environ["VLLM_USE_V1"] = "1"
-os.environ["VLLM_ENABLE_V1_MULTIPROCESSING"] = "1"
-os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
+os.environ.setdefault("VLLM_USE_V1", "1")
+os.environ.setdefault("VLLM_ENABLE_V1_MULTIPROCESSING", "1")
+os.environ.setdefault("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
 os.environ.setdefault("VLLM_FLASH_ATTN_VERSION", "2")
 
 long_context = ""
