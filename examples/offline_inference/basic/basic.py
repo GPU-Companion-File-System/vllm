@@ -1,13 +1,18 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import os
+
+# Keep standalone invocation consistent with the reproducible shell runner.
+# FA3 can still be selected explicitly after its extension is built.
+os.environ.setdefault("VLLM_FLASH_ATTN_VERSION", "2")
+
 from vllm import LLM, SamplingParams
 from transformers import AutoTokenizer
 from vllm.config import KVTransferConfig
 
 import torch
 
-import os
 import json
 from pathlib import Path
 import time
@@ -58,7 +63,7 @@ os.environ["LMCACHE_USE_EXPERIMENTAL"] = "True"
 os.environ["VLLM_USE_V1"] = "1"
 os.environ["VLLM_ENABLE_V1_MULTIPROCESSING"] = "1"
 os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
-os.environ["VLLM_FLASH_ATTN_VERSION"] = "3"
+os.environ.setdefault("VLLM_FLASH_ATTN_VERSION", "2")
 
 long_context = ""
 with open(MAN_BASH_PATH, "r") as f:
