@@ -4,10 +4,6 @@
 from vllm import LLM, SamplingParams
 from transformers import AutoTokenizer
 from vllm.config import KVTransferConfig
-ktc = KVTransferConfig(
-    kv_connector="TardisConnectorV1",
-    kv_role="kv_both",
-)
 
 import torch
 
@@ -47,6 +43,14 @@ PARTIAL_PREFIX_CHARS = int(
 METRICS_OUTPUT = os.environ.get("BASIC_METRICS_OUTPUT", "")
 ENABLE_CUDA_PROFILER = os.environ.get(
     "BASIC_CUDA_PROFILER", "0").strip().lower() in {"1", "true", "yes", "on"}
+KV_CONNECTOR = os.environ.get(
+    "BASIC_KV_CONNECTOR", "TardisConnectorV1").strip()
+if KV_CONNECTOR not in {"TardisConnectorV1", "LMCacheConnectorV1"}:
+    raise ValueError(
+        "BASIC_KV_CONNECTOR must be TardisConnectorV1 or "
+        "LMCacheConnectorV1"
+    )
+ktc = KVTransferConfig(kv_connector=KV_CONNECTOR, kv_role="kv_both")
 
 os.environ["TARDIS_CONFIG_FILE"] = TARDIS_CONFIG_FILE
 os.environ["LMCACHE_CONFIG_FILE"] = LMCACHE_CONFIG_FILE
@@ -232,6 +236,8 @@ def main():
             "max_model_len": MAX_MODEL_LEN,
             "max_tokens": MAX_TOKENS,
             "block_size": BLOCK_SIZE,
+            "kv_connector": KV_CONNECTOR,
+            "lmcache_config_file": LMCACHE_CONFIG_FILE,
             "cuda_profiler": ENABLE_CUDA_PROFILER,
             "runs": run_metrics,
         }, indent=2) + "\n", encoding="utf-8")
