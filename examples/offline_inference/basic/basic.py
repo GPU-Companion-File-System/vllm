@@ -27,6 +27,9 @@ LMCACHE_CONFIG_FILE = os.environ.get(
 MAN_BASH_PATH = os.environ.get(
     "MAN_BASH_PATH", str(SCRIPT_DIR / "man-bash.txt"))
 CONTEXT_CHARS = int(os.environ.get("BASIC_CONTEXT_CHARS", "155000"))
+CONTEXT_TOKENS = int(os.environ.get("BASIC_CONTEXT_TOKENS", "0"))
+PARTIAL_PREFIX_TOKENS = int(
+    os.environ.get("BASIC_PARTIAL_PREFIX_TOKENS", "0"))
 NUM_PROMPTS = int(os.environ.get("BASIC_NUM_PROMPTS", "4"))
 MAX_MODEL_LEN = int(os.environ.get("BASIC_MAX_MODEL_LEN", "131072"))
 MAX_NUM_BATCHED_TOKENS = int(
@@ -78,9 +81,52 @@ prompt_partial = (
     f"{question}"
 )
 
-print(f"Prompt length: {len(tokenizer.encode(prompt))} tokens")
+token_prompt_full = None
+token_prompt_partial = None
+if CONTEXT_TOKENS > 0:
+    seed_tokens = tokenizer.encode(long_context, add_special_tokens=False)
+    if not seed_tokens:
+        raise ValueError("BASIC_CONTEXT_TOKENS requires a non-empty context")
+    repeats = (CONTEXT_TOKENS + len(seed_tokens) - 1) // len(seed_tokens)
+    context_tokens = (seed_tokens * repeats)[:CONTEXT_TOKENS]
+    question_tokens = tokenizer.encode(
+        f"\n\n{question}", add_special_tokens=False)
+    token_prompt_full = context_tokens + question_tokens
+    partial_length = PARTIAL_PREFIX_TOKENS or CONTEXT_TOKENS // 2
+    partial_length = min(max(partial_length, 1), CONTEXT_TOKENS - 1)
+    new_suffix = tokenizer.encode(
+        "\n\nThis is a new suffix.", add_special_tokens=False)
+    token_prompt_partial = (
+        context_tokens[:partial_length]
+        + new_suffix
+        + context_tokens[partial_length:]
+        + question_tokens
+    )
 
-def prompts_for_run(run_idx: int) -> list[str]:
+
+def prompt_length(prompt_input) -> int:
+    if isinstance(prompt_input, dict):
+        return len(prompt_input["prompt_token_ids"])
+    if isinstance(prompt_input, (list, tuple)):
+        return len(prompt_input)
+    return len(tokenizer.encode(prompt_input))
+
+
+print(
+    f"Prompt length: {prompt_length(token_prompt_full or prompt)} tokens; "
+    f"context_tokens={CONTEXT_TOKENS or 'char-limited'}"
+)
+
+def prompts_for_run(run_idx: int) -> list:
+    if token_prompt_full is not None and token_prompt_partial is not None:
+        token_ids = (
+            token_prompt_partial if PREFIX_MODE == "partial" and run_idx > 0
+            else token_prompt_full
+        )
+        return [
+            {"prompt_token_ids": token_ids.copy()}
+            for _ in range(NUM_PROMPTS)
+        ]
     # Populate the cache with the full prompt, then change only the suffix.
     base = prompt_partial if PREFIX_MODE == "partial" and run_idx > 0 else prompt
     return [base] * NUM_PROMPTS
@@ -152,7 +198,7 @@ def main():
         run_metrics.append({
             "run_idx": run_idx,
             "prefix_mode": PREFIX_MODE,
-            "prompt_tokens": [len(tokenizer.encode(prompt)) for prompt in prompts],
+            "prompt_tokens": [prompt_length(prompt) for prompt in prompts],
             "wall_seconds": wall_seconds,
             "requests": [output_metrics(output) for output in outputs],
         })
@@ -181,6 +227,8 @@ def main():
             "num_prompts": NUM_PROMPTS,
             "num_runs": NUM_RUNS,
             "context_chars": CONTEXT_CHARS,
+            "context_tokens": CONTEXT_TOKENS,
+            "partial_prefix_tokens": PARTIAL_PREFIX_TOKENS,
             "max_model_len": MAX_MODEL_LEN,
             "max_tokens": MAX_TOKENS,
             "block_size": BLOCK_SIZE,
